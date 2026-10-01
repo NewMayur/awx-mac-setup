@@ -1,0 +1,92 @@
+name: Test AWX Installation on macOS
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-mac-install:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: System Diagnostic
+        run: |
+          echo "=== macOS Diagnostic ==="
+          uname -a
+          sw_vers
+          sysctl -n machdep.cpu.brand_string || uname -m
+          sysctl hw.ncpu hw.memsize
+          df -h
+
+      - name: Install System Dependencies via Homebrew
+        run: |
+          brew install minikube kubernetes-cli kustomize
+
+      - name: Start Minikube Cluster
+        run: |
+          minikube start --driver=qemu --cpus=3 --memory=6144mb
+          kubectl wait --for=condition=ready node -l node-role.kubernetes.io/control-plane --timeout=180s
+          kubectl cluster-info
+
+      - name: Clone and Deploy AWX Operator
+        run: |
+          git clone https://github.com/ansible/awx-operator.git
+          cd awx-operator
+          git checkout 2.19.0
+          export NAMESPACE=awx
+          kubectl create namespace ${NAMESPACE}
+          kubectl config set-context --current --namespace=${NAMESPACE}
+          make deploy
+          kubectl -n awx set image deployment/awx-operator-controller-manager \
+            kube-rbac-proxy=quay.io/brancz/kube-rbac-proxy:v0.15.0 || true
+          kubectl -n awx rollout status deployment/awx-operator-controller-manager --timeout=600s
+          kubectl -n awx get pods -o wide
+
+      - name: Deploy AWX Instance Configuration
+        run: |
+          cat <<AWX_EOF > awx-instance.yaml
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: my-awx
+            namespace: awx
+          spec:
+            service_type: NodePort
+          AWX_EOF
+          kubectl apply -f awx-instance.yaml
+
+      - name: Wait for Successful Database and Deployment Initialization
+        run: |
+          echo "Waiting for pods to be scheduled by operator..."
+          for i in {1..60}; do
+            if kubectl -n awx get pod -l app.kubernetes.io/name=my-awx-web --no-headers 2>/dev/null | grep -q .; then
+              echo "AWX web pod scheduled."
+              break
+            fi
+            echo "Waiting for operator to create pods ($i/60)..."
+            sleep 10
+          done
+
+          echo "Waiting for PostgreSQL pod to be Ready..."
+          kubectl -n awx wait --for=condition=ready pod -l app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/component=database --timeout=360s || true
+
+          echo "Waiting for AWX Web pod to be Ready..."
+          kubectl -n awx wait --for=condition=ready pod -l app.kubernetes.io/name=my-awx-web --timeout=600s
+
+          echo "Waiting for AWX Task pod to be Ready..."
+          kubectl -n awx wait --for=condition=ready pod -l app.kubernetes.io/name=my-awx-task --timeout=600s
+
+          echo "All AWX pods are Ready!"
+          kubectl -n awx get pods -o wide
+
+      - name: Extract Admin Credentials and Validate Service
+        run: |
+          PASSWORD=$(kubectl -n awx get secret my-awx-admin-password -o jsonpath="{.data.password}" | base64 --decode)
+          echo "============================================="
+          echo "AWX Admin Username : admin"
+          echo "AWX Admin Password : $PASSWORD"
+          echo "============================================="
+          kubectl -n awx get svc my-awx-service
