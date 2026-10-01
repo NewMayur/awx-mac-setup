@@ -7,7 +7,7 @@ on:
 jobs:
   test-k8s-awx:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -86,29 +86,47 @@ jobs:
           echo "All AWX pods are Ready!"
           kubectl -n awx get pods -o wide
 
-      - name: Extract Admin Credentials and Validate Service
+      - name: Expose AWX Web UI via Cloudflare Tunnel
         run: |
           PASSWORD=$(kubectl -n awx get secret my-awx-admin-password -o jsonpath="{.data.password}" | base64 --decode)
           echo "=========================================================="
           echo "AWX Admin Username : admin"
           echo "AWX Admin Password : $PASSWORD"
           echo "=========================================================="
-          kubectl -n awx get svc my-awx-service
 
-          # Direct local endpoint verification
-          NODE_IP=$(kubectl get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-          NODE_PORT=$(kubectl -n awx get svc my-awx-service -o jsonpath='{.spec.ports[0].nodePort}')
-          echo "Local NodePort endpoint: http://$NODE_IP:$NODE_PORT"
-          curl -sI "http://$NODE_IP:$NODE_PORT" | head -n 10 || true
+          # Forward port 8050 to the AWX web service in background
+          kubectl -n awx port-forward svc/my-awx-service 8050:80 &
+          sleep 5
 
-          # ------------------------------------------------------------------
-          # Optional Tunnel for Remote Cloud Runners:
-          # On a physical Mac, this is NOT needed because 'minikube service'
-          # or NodePort gives direct localhost/LAN browser access.
-          # ------------------------------------------------------------------
-          # kubectl -n awx port-forward svc/my-awx-service 8050:80 &
-          # curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
-          # chmod +x /tmp/cloudflared
-          # /tmp/cloudflared tunnel --url http://localhost:8050 --no-autoupdate > /tmp/tunnel.log 2>&1 &
-          # sleep 5
-          # grep -o "https://[a-zA-Z0-9-]*\.trycloudflare\.com" /tmp/tunnel.log | head -n 1
+          # Download Cloudflare tunnel binary
+          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+          chmod +x /tmp/cloudflared
+
+          # Launch quick tunnel pointing to port 8050
+          /tmp/cloudflared tunnel --url http://localhost:8050 --no-autoupdate > /tmp/tunnel.log 2>&1 &
+          
+          echo "Establishing public HTTPS tunnel..."
+          for i in {1..30}; do
+            if grep -o "https://[a-zA-Z0-9-]*\.trycloudflare\.com" /tmp/tunnel.log | head -n 1 | grep -q trycloudflare; then
+              break
+            fi
+            sleep 2
+          done
+
+          PUBLIC_URL=$(grep -o "https://[a-zA-Z0-9-]*\.trycloudflare\.com" /tmp/tunnel.log | head -n 1)
+
+          echo ""
+          echo "=========================================================="
+          echo "🚀 PUBLIC AWX URL (For cloud runner remote inspection):"
+          echo "👉 $PUBLIC_URL"
+          echo "Username : admin"
+          echo "Password : $PASSWORD"
+          echo "=========================================================="
+          echo ""
+
+          # Verify tunnel endpoint is responding
+          curl -sI "$PUBLIC_URL" | head -n 10 || true
+
+          # Keep tunnel active for 15 minutes to allow inspection and login
+          echo "Keeping public tunnel active for 15 minutes..."
+          sleep 900
