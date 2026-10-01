@@ -23,10 +23,12 @@ jobs:
 
       - name: Install System Dependencies via Homebrew
         run: |
-          brew install minikube kubernetes-cli kustomize
+          echo "Installing qemu, minikube, and kubernetes-cli..."
+          brew install qemu minikube kubernetes-cli kustomize
 
       - name: Start Minikube Cluster
         run: |
+          echo "Starting Minikube with qemu driver on macOS ARM64 runner..."
           minikube start --driver=qemu --cpus=3 --memory=6144mb
           kubectl wait --for=condition=ready node -l node-role.kubernetes.io/control-plane --timeout=180s
           kubectl cluster-info
