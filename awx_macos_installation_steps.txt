@@ -1,0 +1,99 @@
+# Errorless AWX Installation Guide for macOS (Intel & Apple Silicon)
+
+This guide leverages **Minikube** and **Docker** to deploy the AWX Operator. It circumvents standard environment configuration issues by isolating the runtime inside a local Kubernetes cluster.
+
+---
+
+## Prerequisites
+* **Processor:** Intel or Apple Silicon (M1/M2/M3/M4)
+* **Memory:** Minimum 16GB system RAM (8GB will be dedicated to Minikube)
+* **Package Manager:** Homebrew installed (`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`)
+
+---
+
+## Step 1: Install Dependencies
+Open the macOS Terminal and install the required tooling CLI utilities via Homebrew:
+```bash
+# Install Docker Desktop (Virtualization engine)
+brew install --cask docker
+
+# Install Minikube (Local Kubernetes Engine)
+brew install minikube
+
+# Install kubectl (Kubernetes Control CLI)
+brew install kubernetes-cli
+
+# Install kustomize (Kubernetes configuration customization engine)
+brew install kustomize
+```
+*Note: You must launch the **Docker.app** manually from your Applications folder once, complete the onboarding prompt, and verify that the green "Engine Running" icon is visible in the taskbar before proceeding.*
+
+---
+
+## Step 2: Initialize the Cluster Runtime
+Allocate the necessary system resources required to handle the internal AWX Postgres instance, task runner, and web server:
+```bash
+minikube start --driver=docker --cpus=4 --memory=8192mb --addons=ingress
+```
+
+---
+
+## Step 3: Deploy the AWX Operator
+The Operator monitors the cluster state and deploys all underlying containers dynamically.
+```bash
+# Clone the repository
+git clone https://github.com/ansible/awx-operator.git
+cd awx-operator
+
+# Switch to a verified stable deployment tag
+git checkout 2.19.0
+
+# Initialize dedicated namespace infrastructure
+export NAMESPACE=awx
+kubectl create namespace ${NAMESPACE}
+kubectl config set-context --current --namespace=${NAMESPACE}
+
+# Run the deployment build process
+make deploy
+```
+*Verify deployment progress via `kubectl get pods`. Ensure the operator pod reaches a `Running` status before proceeding.*
+
+---
+
+## Step 4: Provision the Application Instance
+Create an instruction set for the deployment controllers to boot the core application database and interface nodes.
+
+1. Generate the deployment manifest `awx-instance.yaml`:
+```yaml
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: my-awx
+spec:
+  service_type: NodePort
+```
+
+2. Register the configuration file within the active cluster:
+```bash
+kubectl apply -f awx-instance.yaml
+```
+
+3. Track the configuration pipeline (Takes roughly 5-10 minutes):
+```bash
+kubectl get pods -w
+```
+*Exit tracking via `Ctrl + C` once all worker nodes status read `Running` or `Completed`.*
+
+---
+
+## Step 5: Credentials Extraction and Access Gateway
+1. Extract the encrypted dashboard entry password:
+```bash
+kubectl get secret my-awx-admin-password -o jsonpath="{.data.password}" | base64 --decode; echo
+```
+*The default administrator access profile name is: `admin`*
+
+2. Map the local port gateway to access the dashboard on your host machine browser:
+```bash
+minikube service my-awx-service --url
+```
